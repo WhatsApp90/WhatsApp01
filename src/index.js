@@ -1,9 +1,10 @@
-// بوت واتساب إسلامي - مجموعة عائلتي العزيزة
 import "dotenv/config";
+import { promises as fs } from "fs";
 import { Boom } from "@hapi/boom";
 import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
+  Browsers,
 } from "@whiskeysockets/baileys";
 import pino from "pino";
 import cron from "node-cron";
@@ -26,67 +27,103 @@ const EVENING_TIME = process.env.EVENING_TIME || "16:00";
 const PHONE_NUMBER = process.env.PHONE_NUMBER;
 
 if (!GROUP_ID) {
-  console.error("ERROR: الرجاء ضبط GROUP_ID في المتغيرات");
+  console.error("ERROR: الرجاء ضبط GROUP_ID");
+  process.exit(1);
+}
+if (!PHONE_NUMBER) {
+  console.error("ERROR: الرجاء ضبط PHONE_NUMBER");
   process.exit(1);
 }
 
-if (!PHONE_NUMBER) {
-  console.error("ERROR: الرجاء ضبط PHONE_NUMBER في المتغيرات");
-  process.exit(1);
-}
+// رقم الهاتف بدون أي رموز - أرقام فقط
+const CLEAN_PHONE = PHONE_NUMBER.replace(/[^0-9]/g, "");
 
 let sock;
-let pairingCodeRequested = false;
+let schedulesStarted = false;
+let pairingDone = false;
+let reconnectDelay = 10000;
 
-async function connectToWhatsApp() {
+async function clearAuth() {
+  try {
+    await fs.rm("auth_info", { recursive: true, force: true });
+    console.log("تم مسح بيانات الجلسة القديمة");
+  } catch (_) {}
+}
+
+async function connectToWhatsApp(isReconnect = false) {
+  if (!isReconnect) {
+    await clearAuth();
+    pairingDone = false;
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState("auth_info");
 
   sock = makeWASocket({
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: "silent" }),
-    browser: ["ubuntu", "Chrome", "1.0.0"],
+    browser: Browsers.ubuntu("Chrome"),
+    connectTimeoutMs: 60000,
+    keepAliveIntervalMs: 25000,
+    retryRequestDelayMs: 2000,
   });
 
   sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr && !pairingCodeRequested) {
-      pairingCodeRequested = true;
+  // طلب كود الربط فور إنشاء الاتصال - قبل ظهور QR
+  if (!state.creds.registered && !pairingDone) {
+    setTimeout(async () => {
+      if (pairingDone) return;
       try {
-        const code = await sock.requestPairingCode(PHONE_NUMBER);
+        pairingDone = true;
+        const code = await sock.requestPairingCode(CLEAN_PHONE);
         console.log("");
-        console.log("==================================");
-        console.log("   كود الربط - Pairing Code      ");
-        console.log("   >>> " + code + " <<<          ");
-        console.log("==================================");
-        console.log("افتح واتساب على هاتفك:");
-        console.log("النقاط الثلاث > الاجهزة المرتبطة > ربط جهاز > ربط برقم الهاتف");
+        console.log("╔══════════════════════════════════╗");
+        console.log("║       كود الربط - Pairing Code    ║");
+        console.log("║         >>> " + code + " <<<         ║");
+        console.log("╚══════════════════════════════════╝");
+        console.log("افتح واتساب > النقاط الثلاث > الاجهزة المرتبطة");
+        console.log("> ربط جهاز > ربط برقم الهاتف > أدخل الكود");
         console.log("");
       } catch (err) {
-        console.error("خطأ في طلب كود الربط:", err.message);
-        pairingCodeRequested = false;
+        pairingDone = false;
+        console.error("فشل طلب كود الربط:", err.message);
+        console.log("سيتم إعادة المحاولة عند الاتصال التالي...");
       }
-    }
+    }, 4000);
+  }
+
+  sock.ev.on("connection.update", async (update) => {
+    const { connection, lastDisconnect } = update;
 
     if (connection === "close") {
-      pairingCodeRequested = false;
-      const shouldReconnect =
+      const statusCode =
         lastDisconnect?.error instanceof Boom
-          ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
-          : true;
+          ? lastDisconnect.error.output.statusCode
+          : 0;
 
-      if (shouldReconnect) {
-        console.log("إعادة الاتصال...");
-        connectToWhatsApp();
+      console.log(`انقطع الاتصال - الكود: ${statusCode}`);
+
+      if (statusCode === DisconnectReason.loggedOut) {
+        console.log("تم تسجيل الخروج - إعادة البدء من جديد...");
+        schedulesStarted = false;
+        await clearAuth();
+        pairingDone = false;
+        reconnectDelay = 10000;
+        setTimeout(() => connectToWhatsApp(false), reconnectDelay);
       } else {
-        console.log("تم تسجيل الخروج. احذف مجلد auth_info لإعادة التسجيل.");
+        // زيادة تدريجية في وقت الانتظار لتجنب الحظر
+        reconnectDelay = Math.min(reconnectDelay * 1.5, 120000);
+        console.log(`إعادة الاتصال بعد ${Math.round(reconnectDelay / 1000)} ثانية...`);
+        setTimeout(() => connectToWhatsApp(true), reconnectDelay);
       }
     } else if (connection === "open") {
       console.log("تم الاتصال بواتساب بنجاح");
-      scheduleJobs();
+      reconnectDelay = 10000;
+      if (!schedulesStarted) {
+        schedulesStarted = true;
+        scheduleJobs();
+      }
     }
   });
 
@@ -99,10 +136,9 @@ async function connectToWhatsApp() {
       m.message.extendedTextMessage?.text ||
       "";
     const from = m.key.remoteJid;
-
     if (from !== GROUP_ID) return;
 
-    const cmd = text.trim().toLowerCase();
+    const cmd = text.trim();
     try {
       if (cmd === "أذكار" || cmd === "اذكار") {
         await sock.sendMessage(from, { text: await buildMorningMessage() });
@@ -140,12 +176,14 @@ async function connectToWhatsApp() {
 }
 
 function scheduleJobs() {
+  const [mH, mM] = MORNING_TIME.split(":");
+  const [eH, eM] = EVENING_TIME.split(":");
+
   cron.schedule(
-    `${MORNING_TIME.split(":")[1]} ${MORNING_TIME.split(":")[0]} * * *`,
+    `${mM} ${mH} * * *`,
     async () => {
       try {
-        const msg = await buildMorningMessage();
-        await sock.sendMessage(GROUP_ID, { text: msg });
+        await sock.sendMessage(GROUP_ID, { text: await buildMorningMessage() });
         console.log("تم نشر أذكار الصباح");
       } catch (err) {
         console.error("خطأ في نشر أذكار الصباح:", err);
@@ -155,11 +193,10 @@ function scheduleJobs() {
   );
 
   cron.schedule(
-    `${EVENING_TIME.split(":")[1]} ${EVENING_TIME.split(":")[0]} * * *`,
+    `${eM} ${eH} * * *`,
     async () => {
       try {
-        const msg = await buildEveningMessage();
-        await sock.sendMessage(GROUP_ID, { text: msg });
+        await sock.sendMessage(GROUP_ID, { text: await buildEveningMessage() });
         console.log("تم نشر أذكار المساء");
       } catch (err) {
         console.error("خطأ في نشر أذكار المساء:", err);
@@ -168,11 +205,11 @@ function scheduleJobs() {
     { timezone: "Asia/Aden" }
   );
 
-  console.log(`النشر: الصباح ${MORNING_TIME} والمساء ${EVENING_TIME} بتوقيت حضرموت`);
+  console.log(`النشر: الصباح ${MORNING_TIME} والمساء ${EVENING_TIME} توقيت اليمن`);
 }
 
-connectToWhatsApp().catch((err) => {
-  console.error("فشل الاتصال:", err);
+connectToWhatsApp(false).catch((err) => {
+  console.error("فشل التشغيل:", err);
   process.exit(1);
 });
-                  
+        
