@@ -1,3 +1,4 @@
+// بوت واتساب إسلامي - مجموعة عائلتي العزيزة
 import "dotenv/config";
 import { Boom } from "@hapi/boom";
 import makeWASocket, {
@@ -25,12 +26,12 @@ const EVENING_TIME = process.env.EVENING_TIME || "16:00";
 const PHONE_NUMBER = process.env.PHONE_NUMBER;
 
 if (!GROUP_ID) {
-  console.error("⚠️  الرجاء ضبط GROUP_ID في المتغيرات");
+  console.error("ERROR: الرجاء ضبط GROUP_ID في المتغيرات");
   process.exit(1);
 }
 
 if (!PHONE_NUMBER) {
-  console.error("⚠️  الرجاء ضبط PHONE_NUMBER في المتغيرات");
+  console.error("ERROR: الرجاء ضبط PHONE_NUMBER في المتغيرات");
   process.exit(1);
 }
 
@@ -43,45 +44,45 @@ async function connectToWhatsApp() {
     auth: state,
     printQRInTerminal: false,
     logger: pino({ level: "silent" }),
-    browser: ["islamic-bot", "Chrome", "1.0.0"],
+    browser: ["ubuntu", "Chrome", "1.0.0"],
   });
 
   sock.ev.on("creds.update", saveCreds);
 
-  let pairingCodeRequested = false;
+  if (!state.creds.registered) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    try {
+      const code = await sock.requestPairingCode(PHONE_NUMBER);
+      console.log("");
+      console.log("==================================");
+      console.log("   كود الربط - Pairing Code      ");
+      console.log("   >>> " + code + " <<<          ");
+      console.log("==================================");
+      console.log("افتح واتساب على هاتفك:");
+      console.log("النقاط الثلاث > الاجهزة المرتبطة > ربط جهاز > ربط برقم الهاتف");
+      console.log("");
+    } catch (err) {
+      console.error("خطأ في طلب كود الربط:", err.message);
+    }
+  }
 
   sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-
-    if (qr && !pairingCodeRequested) {
-      pairingCodeRequested = true;
-      try {
-        const code = await sock.requestPairingCode(PHONE_NUMBER);
-        console.log("\n╔══════════════════════════════════╗");
-        console.log("║   كود الربط - Pairing Code        ║");
-        console.log(`║         👉  ${code}         ║`);
-        console.log("╚══════════════════════════════════╝");
-        console.log("ادخل الكود في واتساب:");
-        console.log("الأجهزة المرتبطة > ربط جهاز > ربط برقم الهاتف\n");
-      } catch (err) {
-        console.error("خطأ في طلب كود الربط:", err.message);
-      }
-    }
+    const { connection, lastDisconnect } = update;
 
     if (connection === "close") {
       const shouldReconnect =
         lastDisconnect?.error instanceof Boom
           ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
           : true;
+
       if (shouldReconnect) {
         console.log("إعادة الاتصال...");
-        pairingCodeRequested = false;
         connectToWhatsApp();
       } else {
         console.log("تم تسجيل الخروج. احذف مجلد auth_info لإعادة التسجيل.");
       }
     } else if (connection === "open") {
-      console.log("✅ تم الاتصال بواتساب بنجاح");
+      console.log("تم الاتصال بواتساب بنجاح");
       scheduleJobs();
     }
   });
@@ -109,16 +110,16 @@ async function connectToWhatsApp() {
         if (p) await sock.sendMessage(from, { text: p });
       } else if (cmd === "تاريخ" || cmd === "هجري") {
         const h = getHijriDate();
-        await sock.sendMessage(from, { text: `📅 ${h.dayName} ${h.full}` });
+        await sock.sendMessage(from, { text: `${h.dayName} ${h.full}` });
       } else if (cmd === "حدث") {
         const h = getHijriDate();
         await sock.sendMessage(from, {
-          text: `📜 *حدث في مثل هذا اليوم الهجري*\n${getEventForHijriDate(h)}`,
+          text: `حدث في مثل هذا اليوم الهجري\n${getEventForHijriDate(h)}`,
         });
       } else if (cmd === "قصة") {
         const s = morningStories[Math.floor(Math.random() * morningStories.length)];
         await sock.sendMessage(from, {
-          text: `📖 *${s.title}*\n${s.text}\n\n💡 ${s.lesson}`,
+          text: `${s.title}\n${s.text}\n\n${s.lesson}`,
         });
       } else if (cmd === "همسة" || cmd === "همسه") {
         await sock.sendMessage(from, {
@@ -142,7 +143,7 @@ function scheduleJobs() {
       try {
         const msg = await buildMorningMessage();
         await sock.sendMessage(GROUP_ID, { text: msg });
-        console.log("✅ تم نشر أذكار الصباح");
+        console.log("تم نشر أذكار الصباح");
       } catch (err) {
         console.error("خطأ في نشر أذكار الصباح:", err);
       }
@@ -156,7 +157,7 @@ function scheduleJobs() {
       try {
         const msg = await buildEveningMessage();
         await sock.sendMessage(GROUP_ID, { text: msg });
-        console.log("✅ تم نشر أذكار المساء");
+        console.log("تم نشر أذكار المساء");
       } catch (err) {
         console.error("خطأ في نشر أذكار المساء:", err);
       }
@@ -164,11 +165,11 @@ function scheduleJobs() {
     { timezone: "Asia/Aden" }
   );
 
-  console.log(`⏰ النشر: الصباح ${MORNING_TIME} والمساء ${EVENING_TIME} (بتوقيت حضرموت)`);
+  console.log(`النشر: الصباح ${MORNING_TIME} والمساء ${EVENING_TIME} بتوقيت حضرموت`);
 }
 
 connectToWhatsApp().catch((err) => {
   console.error("فشل الاتصال:", err);
   process.exit(1);
 });
-              
+      
