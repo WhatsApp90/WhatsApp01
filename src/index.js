@@ -36,6 +36,7 @@ if (!PHONE_NUMBER) {
 }
 
 let sock;
+let pairingCodeRequested = false;
 
 async function connectToWhatsApp() {
   const { state, saveCreds } = await useMultiFileAuthState("auth_info");
@@ -49,27 +50,29 @@ async function connectToWhatsApp() {
 
   sock.ev.on("creds.update", saveCreds);
 
-  if (!state.creds.registered) {
-    await new Promise((resolve) => setTimeout(resolve, 3000));
-    try {
-      const code = await sock.requestPairingCode(PHONE_NUMBER);
-      console.log("");
-      console.log("==================================");
-      console.log("   كود الربط - Pairing Code      ");
-      console.log("   >>> " + code + " <<<          ");
-      console.log("==================================");
-      console.log("افتح واتساب على هاتفك:");
-      console.log("النقاط الثلاث > الاجهزة المرتبطة > ربط جهاز > ربط برقم الهاتف");
-      console.log("");
-    } catch (err) {
-      console.error("خطأ في طلب كود الربط:", err.message);
-    }
-  }
-
   sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect } = update;
+    const { connection, lastDisconnect, qr } = update;
+
+    if (qr && !pairingCodeRequested) {
+      pairingCodeRequested = true;
+      try {
+        const code = await sock.requestPairingCode(PHONE_NUMBER);
+        console.log("");
+        console.log("==================================");
+        console.log("   كود الربط - Pairing Code      ");
+        console.log("   >>> " + code + " <<<          ");
+        console.log("==================================");
+        console.log("افتح واتساب على هاتفك:");
+        console.log("النقاط الثلاث > الاجهزة المرتبطة > ربط جهاز > ربط برقم الهاتف");
+        console.log("");
+      } catch (err) {
+        console.error("خطأ في طلب كود الربط:", err.message);
+        pairingCodeRequested = false;
+      }
+    }
 
     if (connection === "close") {
+      pairingCodeRequested = false;
       const shouldReconnect =
         lastDisconnect?.error instanceof Boom
           ? lastDisconnect.error.output.statusCode !== DisconnectReason.loggedOut
@@ -172,4 +175,4 @@ connectToWhatsApp().catch((err) => {
   console.error("فشل الاتصال:", err);
   process.exit(1);
 });
-      
+                  
